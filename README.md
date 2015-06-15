@@ -5,6 +5,8 @@
 Load in original dataset for competition, exploratory data analysis and feature engineering
 - classifier_exp.py
 Load in engineered features dataframe for training and test sets, model training, tuning and prediction and create submission files
+- xgboost_clf.Rmd
+XGBoost model for training and prediction in R. Didn't do as well as expected although it was blazing fast.
 - ensemble_blending.py
 Create a blended ensemble of best tuned models to improve robustness of final submission and reduce overfitting to training set
 
@@ -12,6 +14,7 @@ Create a blended ensemble of best tuned models to improve robustness of final su
 - Overall, Random Forests, Extra Trees and Gradient Boosted Trees proved to be the best performing classifiers
 - Since ROC AUC was evaluation metric, add scoring = 'roc_auc' to GridSearchCV made all the difference in fine tuning params
 - Using cv = 5 or 8 in GridSearchCV instead of default 3 increased the robustness of CV score (less prone to overfitting)
+- Using Stratified CV was important because of the skewed positive class to create balanced CV folds
 
 ### Feature engineering
 - Used a combination of counts, means, stddev, max, median of various features from the bids data for feature engineering, and merchandise
@@ -32,6 +35,7 @@ Create a blended ensemble of best tuned models to improve robustness of final su
 - Tried to use anomaly detectors to detect humans that may have been mis-classified as robots. This was not a good idea 
 - Learned that using PCA or SelectKBest leaves out performance on the table because we are throwing away some variance in the feature set. 
   - For Kaggle like competitions, don't bother with feature selection unless number of features become untenable
+- Using class weighting proportional to class ratios for tuning tree-based models proved to be worse than without class weighting which was opposite of what some blogs suggested.
   
 ###Could have done
 - Was unable to use the time column to derive useful features. Based on others sharing models, this was likely the difference between top 10% and 25%
