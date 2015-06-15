@@ -1,0 +1,875 @@
+---
+title: "FB Bidding EDA2 - More condensed code"
+author: "Vijay Sathish"
+date: "Saturday, May 09, 2015"
+output: html_document
+---
+
+### Load all the libraries
+```{r}
+
+library(ggplot2)
+library(GGally)
+library(reshape2)
+library(gridExtra)
+library(dplyr)
+
+```
+
+
+### Loading in the data
+```{r}
+
+train <- read.csv("D:/Kaggle/HumanVRobot/train.csv", header = T)
+test <- read.csv("D:/Kaggle/HumanVRobot/test.csv", header = T)
+bids.raw <- read.csv("D:/Kaggle/HumanVRobot/bids.csv", header = T)
+
+```
+
+### Make a starter submission
+Insight: Use the training data insight that 95% of the bidders are human in training data. So start with prediction that nobody is a robot
+
+```{r}
+
+submit.naive <- data.frame(test$bidder_id, 0.0)
+names(submit.naive) <- c('bidder_id', 'prediction')
+
+# write.csv(submit.naive, "D:/Kaggle//HumanVRobot/naive_submit.csv", row.names = F, sep = ",", col.names = T)
+
+```
+
+### Extract bots from training set
+```{r}
+
+bots <- subset(train, outcome == 1)
+humans <- subset(train, outcome == 0)
+
+n_bots <- dim(bots)[1]
+n_humans <- dim(humans)[1]
+
+bot_ratio = n_bots / (n_bots + n_humans)
+
+```
+
+Notes:
+- 5.117% of training set are bots
+- This means that we have highly skewed classes. Sub-sampling in model is likely to help in this case
+
+### Some exploratory plots on bot addresses and payment info
+```{r}
+
+ggplot(data = bots, aes(x = bidder_id, y = payment_account)) +
+  geom_point()
+
+ggplot(data = bots, aes(x = bidder_id, y = address)) +
+  geom_point()
+  
+
+```
+
+Notes:
+- Appears that addresses and payment info are all unique and spread out; so nothing to mine from that
+
+
+### Subset out bids with bots
+```{r}
+
+bids.bots <- subset(bids.raw, bidder_id %in% bots$bidder_id)
+bids.humans <- subset(bids.raw, bidder_id %in% humans$bidder_id)
+bids.humans$num_bids <- 1
+
+```
+
+## Time for some EDA now!
+
+### Any favorites for bot countries
+```{r}
+
+p1 <- qplot(data = bids.bots, x = country)
+p2 <- qplot(data = bids.humans, x = country)
+
+grid.arrange(p1, p2, ncol = 1)
+
+
+```
+
+Notes:
+- There are few countries that are peaks for bots but not for humans
+- So we can calculate bid fractions for each country adds up to 1
+- Count for a bidder, number of bids from rogue country and from normal country. Above threshold, predict as bot?
+
+## Hypothesis 1 - num. bids made by bots will be on average way higher than bids made by humans
+
+### Count bids per bid_id
+Hypothesis - That bots will make way more bids than humans
+```{r}
+dim.bbids <- dim(bids.bots)
+dim.hbids <- dim(bids.humans)
+
+bid_ratio <- dim.bbids[1] / (dim.hbids[1] + dim.bbids[1])
+
+bot_x = bid_ratio / bot_ratio
+
+```
+
+Notes: 
+- 13.5% of bids are placed by bots even though they form about 5.11% are bots
+- 2.62x more bids by bots on average
+- This is great indicator of bots especially if we see this as the behavior among all bots
+
+## Feature Engineering Part 1 
+### Count average bids per bot/human using dplyr
+```{r}
+
+f3 <- bids.raw %>%
+  group_by(bidder_id) %>%
+  summarize(nbids = n()) %>%
+  arrange(bidder_id)
+
+f3.bots <- subset(f3, bidder_id %in% bots$bidder_id)
+f3.humans <- subset(f3, bidder_id %in% humans$bidder_id)
+
+# Finally split based on test and training set and merge into features
+f3.train <- subset(f3, bidder_id %in% train$bidder_id)
+f3.test <- subset(f3, bidder_id %in% test$bidder_id)
+
+features.train <- f3.train
+features.test <- f3.test
+
+# extreme.humans = subset(f3.humans, nbids > quantile(nbids, probs = 0.99))
+
+```
+
+Notes:
+- From this transformation for bots, we see that the median bid is 716, mean is 4004 (pulled to right because of skew)
+- Apparently, there are few humans doing insane amount of bids but median is 14
+- Since we have only 5% bots, we want to err on the side of caution in predicting a bot
+- So, we have engineered a feature which is number of bids per id - YES!
+
+Notes:
+- features.train and features.test have lesser rows than train and test set. Which means there are some (humans?) with no bids??
+- *** We will need to append these into end of prediction output and mark them as humans
+  - One of the discussions says the missing bidders will be ignored in score calculation
+
+
+
+### Look at merchandise as a category
+```{r}
+
+p1 <- ggplot(data = bids.bots, aes(x = bidder_id, y = merchandise)) +
+  geom_jitter(alpha = 0.01, aes(color = 'red'))
+
+p2 <- ggplot(data = bids.humans, aes(x = bidder_id, y = merchandise)) +
+  geom_jitter(alpha = 0.01, aes(color = 'blue'))
+
+grid.arrange(p1, p2, ncol = 1)
+
+```
+
+Notes
+- Interestingly, bots DO NOT bid in 'auto parts', 'furniture' or 'clothing'
+- *** Might be an additional feature to engineer, ie mark bidder as human if bid in one of these 3 cats
+- Although, even human bidding is quite sparse in that area
+- Humans seem to prefer mobile, jewelry and sporting goods the most
+  - Next up are home goods and office equipment
+- Bots seem to pre-dominate in mobile and sporting goods space, and much lower numbers in home goods and jewelry
+- Overall, it seems like a bot may participate in lesser categories than humans so use that as a feature
+
+### Hypothesis 2 - Humans place bids in more categories than bots
+```{r}
+
+bids.bot_cat <- bids.bots %>%
+  group_by(bidder_id, merchandise) %>%
+  summarize(nbids = n()) %>%
+  arrange(bidder_id, merchandise)
+
+dim(bids.bot_cat)
+
+bids.hum_cat <- bids.humans %>%
+  group_by(bidder_id, merchandise) %>%
+  summarize(nbids = n()) %>%
+  arrange(bidder_id, merchandise)
+dim(bids.hum_cat)
+
+```
+
+Notes:
+- Null hypothesis is true. Surprisingly, both bots and humans seem to take part only in one category
+
+## Feature Engineering Part 2 
+## Hypothesis 3 - Bots place substantially more bids per auction than humans and take part in more auctions than humans
+```{r}
+# Doing in two stages makes it easy to sum up
+# Note that group_by peels off layers one by one
+
+f2 <- bids.raw %>%
+  group_by(bidder_id, auction) %>%
+  summarize(nbids = n()) %>%  
+  arrange(bidder_id, auction)
+
+f3 <- f2 %>%
+  group_by(bidder_id) %>%
+  summarize(num_auc = n(), avg_bp_auc = mean(nbids), med_bp_auc = median(as.double(nbids)), min_bp_auc = min(nbids), max_bp_auc = max(nbids), sd_bp_auc = sd(nbids)) %>%
+  arrange(bidder_id)
+temp <- subset(f3, is.na(sd_bp_auc))
+dim(temp)
+# Replace NaNs with 0 for now
+f3[is.na(f3)] <- 0
+
+f3.bots <- subset(f3, bidder_id %in% bots$bidder_id)
+f3.humans <- subset(f3, bidder_id %in% humans$bidder_id)
+
+# Finally split based on test and training set and merge into features
+f3.train <- subset(f3, bidder_id %in% train$bidder_id)
+f3.test <- subset(f3, bidder_id %in% test$bidder_id)
+
+features.train <- merge(features.train, f3.train, by = "bidder_id")
+head(features.train)
+features.test <- merge(features.test, f3.test, by = "bidder_id")
+head(features.test)
+
+
+
+
+```
+Notes:
+- Hypo 3 is true! Bots take part in more auctions on avg. and place more bids per auction than humans
+- We have engineered two more features
+- Several NAs for stddev for the cases where bidder took part in only 1 bid per auction
+
+## Feature Engineering Part 3
+## Hypothesis 4 - Bots bid from more countries than humans or vice versa?
+```{r}
+
+f2 <- bids.raw %>%
+  group_by(bidder_id, country) %>%
+  summarize(nbids = n()) %>%  
+  arrange(bidder_id, country)
+
+f3 <- f2 %>%
+  group_by(bidder_id) %>%
+  summarize(num_countries = n(), avg_bp_con = mean(nbids), med_bp_con = median(as.double(nbids)), min_bp_con = min(nbids), max_bp_con = max(nbids), sd_bp_con = sd(nbids)) %>%
+  arrange(bidder_id)
+temp <- subset(f3, is.na(sd_bp_con))
+dim(temp)
+# Replace NaNs with 0 for now
+f3[is.na(f3)] <- 0
+
+f3.bots <- subset(f3, bidder_id %in% bots$bidder_id)
+f3.humans <- subset(f3, bidder_id %in% humans$bidder_id)
+
+# Finally split based on test and training set and merge into features
+f3.train <- subset(f3, bidder_id %in% train$bidder_id)
+f3.test <- subset(f3, bidder_id %in% test$bidder_id)
+
+features.train <- merge(features.train, f3.train, by = "bidder_id")
+head(features.train)
+features.test <- merge(features.test, f3.test, by = "bidder_id")
+head(features.test)
+
+```
+
+Notes:
+- Hypo 4 is true! On avg, bots bid from more countries than humans (to obfuscate themselves by VPN, proxy etc)
+- Bots have 15 NAs and humans have 591 NAs. Although, num countries is higher for bots, so 0 is a modest imputation for NAs
+
+## Feature Engineering Part 4
+## Hypothesis 5 - Bots will use more way mobile devices to bid than humans
+
+```{r}
+
+f2 <- bids.raw %>%
+  group_by(bidder_id, device) %>%
+  summarize(nbids = n()) %>%  
+  arrange(bidder_id, device)
+
+f3 <- f2 %>%
+  group_by(bidder_id) %>%
+  summarize(num_devices = n(), avg_bp_dev = mean(nbids), med_bp_dev = median(as.double(nbids)), min_bp_dev = min(nbids), max_bp_dev = max(nbids), sd_bp_dev = sd(nbids)) %>%
+  arrange(bidder_id)
+temp <- subset(f3, is.na(sd_bp_dev))
+dim(temp)
+# Replace NaNs with 0 for now
+f3[is.na(f3)] <- 0
+
+f3.bots <- subset(f3, bidder_id %in% bots$bidder_id)
+f3.humans <- subset(f3, bidder_id %in% humans$bidder_id)
+
+# Finally split based on test and training set and merge into features
+f3.train <- subset(f3, bidder_id %in% train$bidder_id)
+f3.test <- subset(f3, bidder_id %in% test$bidder_id)
+
+features.train <- merge(features.train, f3.train, by = "bidder_id")
+head(features.train)
+features.test <- merge(features.test, f3.test, by = "bidder_id")
+head(features.test)
+
+# Rename only a particular column due to mistake in merging (Was only one time operation after error was corrected)
+# names(features.train)[names(features.train) == 'num_countries.y'] <- 'num_devices'
+# names(features.test)[names(features.test) == 'num_countries.y'] <- 'num_devices'
+
+```
+
+Note:
+Hypo 5 is also true
+14 NAs for bots' stddev and 397! NAs for humans stddev. Thats clearly not good as a feature
+
+
+## Feature Engineering - Part 5
+### Hypothesis 6  - Do the same thing for URL and IP address counts
+
+```{r}
+
+# First for URLs
+f2 <- bids.raw %>%
+  group_by(bidder_id, url) %>%
+  summarize(nbids = n()) %>%  
+  arrange(bidder_id, url)
+
+f3 <- f2 %>%
+  group_by(bidder_id) %>%
+  summarize(num_urls = n(), avg_bp_url = mean(nbids), med_bp_url = median(as.double(nbids)), min_bp_url = min(nbids), max_bp_url = max(nbids), sd_bp_url = sd(nbids)) %>%
+  arrange(bidder_id)
+temp <- subset(f3, is.na(sd_bp_url))
+dim(temp)
+# Replace NaNs with 0 for now
+f3[is.na(f3)] <- 0
+
+f3.bots <- subset(f3, bidder_id %in% bots$bidder_id)
+f3.humans <- subset(f3, bidder_id %in% humans$bidder_id)
+
+# Finally split based on test and training set and merge into features
+f3.train <- subset(f3, bidder_id %in% train$bidder_id)
+f3.test <- subset(f3, bidder_id %in% test$bidder_id)
+
+features.train <- merge(features.train, f3.train, by = "bidder_id")
+head(features.train)
+features.test <- merge(features.test, f3.test, by = "bidder_id")
+head(features.test)
+
+# Repeat for IPs
+f2 <- bids.raw %>%
+  group_by(bidder_id, ip) %>%
+  summarize(nbids = n()) %>%  
+  arrange(bidder_id, ip)
+
+f3 <- f2 %>%
+  group_by(bidder_id) %>%
+  summarize(num_ips = n(), avg_bp_ip = mean(nbids), med_bp_ip = median(as.double(nbids)), min_bp_ip = min(nbids), max_bp_ip = max(nbids), sd_bp_ip = sd(nbids)) %>%
+  arrange(bidder_id)
+temp <- subset(f3, is.na(sd_bp_ip))
+dim(temp)
+# Replace NaNs with 0 for now
+f3[is.na(f3)] <- 0
+
+f3.bots <- subset(f3, bidder_id %in% bots$bidder_id)
+f3.humans <- subset(f3, bidder_id %in% humans$bidder_id)
+
+# Finally split based on test and training set and merge into features
+f3.train <- subset(f3, bidder_id %in% train$bidder_id)
+f3.test <- subset(f3, bidder_id %in% test$bidder_id)
+
+features.train <- merge(features.train, f3.train, by = "bidder_id")
+head(features.train)
+features.test <- merge(features.test, f3.test, by = "bidder_id")
+head(features.test)
+
+
+```
+
+
+## Feature Engineering - Part 7
+### Hypothesis 8 - The last bidder of an auction is usually a bot
+```{r}
+
+f2 <- bids.raw %>%
+  group_by(auction) %>%
+  summarize(end_time = max(time)) %>%  
+  arrange(auction)
+
+# Damn, all I needed was a join operation
+# join is only part of plyr package
+library(plyr)
+f3 <- join(bids.raw, f2, by = "auction")
+f3$last_bid <- with(f3, (time == end_time)*1) 
+f3$bid <- 1
+
+# Now generate count of last_bids per bidder_id
+# dplyr will not work unless it overrides plyr
+detach(package:plyr)
+library(dplyr)
+f4 <- f3 %>%
+  group_by(bidder_id) %>%
+  summarize(nlastbids = sum(last_bid), last_bid_frac = sum(last_bid) / sum(bid))
+
+f3.bots <- subset(f4, bidder_id %in% bots$bidder_id)
+f3.humans <- subset(f4, bidder_id %in% humans$bidder_id)
+
+ggplot(data = f3.bots, aes(x = last_bid_frac)) +
+  geom_histogram() +
+  scale_x_log10()
+ggplot(data = f3.humans, aes(x = last_bid_frac)) +
+  geom_histogram() + 
+  scale_x_log10()
+
+
+# Finally split based on test and training set and merge into features
+f3.train <- subset(f4, bidder_id %in% train$bidder_id)
+f3.test <- subset(f4, bidder_id %in% test$bidder_id)
+
+features.train <- merge(features.train, f3.train, by = "bidder_id")
+head(features.train)
+features.test <- merge(features.test, f3.test, by = "bidder_id")
+head(features.test)
+
+```
+
+Note:
+- nlastbids feature proved to be a of no use for RFC and extremely marginal use for GBC
+
+
+## Feature Engineering - Part 8
+### Hypothesis 9 - Calculate average bid frequency (ie bids per time per auction site)
+
+```{r}
+
+# First, calculate bid frequency for a bidder id per auction
+f2 <- bids.raw %>%
+  group_by(bidder_id, auction) %>%
+  summarize(nbids = n(), bid_duration = (max(time) - min(time))/10^10, bid_freq = nbids/bid_duration) %>%  
+  arrange(bidder_id, auction)
+
+# If a bidder placed a single bid at an auction, bid duration will be 0 making frequency infintite. Make it 0 instead
+# 05/14/2015. Imputing 0 for infinite values didn't work, how about imputing 1 instead
+f2$bid_freq[is.infinite(f2$bid_freq)] <- 1
+
+# Next, calculate bid frequency per bidder averaged over all auctions he participated in
+f3 <- f2 %>%
+  group_by(bidder_id) %>%
+  summarize(avg_bid_freq = log(mean(bid_freq))) %>%  
+  # summarize(avg_bid_freq = mean(bid_freq)) %>%  
+  arrange(bidder_id)
+
+summary(f3$avg_bid_freq)
+
+# Finally split based on test and training set and merge into features
+f3.train <- subset(f3, bidder_id %in% train$bidder_id)
+f3.test <- subset(f3, bidder_id %in% test$bidder_id)
+
+features.train <- merge(features.train, f3.train, by = "bidder_id")
+features.test <- merge(features.test, f3.test, by = "bidder_id")
+
+
+### SOME VISUALIZATION AND EXPERIMENTAL SECTION THAT WAS FUTILE ###
+qplot(data = f3, x = avg_bid_freq, bin_width = 0.1)
+
+# Split by bots and humans to see if we have a feature here
+f3.bots <- subset(f3, bidder_id %in% bots$bidder_id)
+f3.bots$is_bot <- 1
+f3.humans <- subset(f3, bidder_id %in% humans$bidder_id)
+f3.humans$is_bot <- 0
+
+# Vertically stack them up for some visualization
+f3.merge <- rbind(f3.bots, f3.humans)
+f3.merge$is_bot <- as.factor(f3.merge$is_bot)
+ggplot(data = f3.merge, aes(x = is_bot, y = avg_bid_freq)) +
+  geom_boxplot()
+
+qplot(data = f3.merge, x = avg_bid_freq)
+qplot(data = f3.humans, x = avg_bid_freq, binwidth = 0.1)
+qplot(data = f3.bots, x = avg_bid_freq, binwidth = 0.1)
+
+# Could humans with extremely high bid frequncies actually be bots mis-classified as bots?
+humans_as_bots <- subset(f3.humans, avg_bid_freq > max(f3.bots$avg_bid_freq))
+dim(humans_as_bots)
+humans_as_bots
+humans_as_bots$is_bot <- 1
+
+# Look at bidding characteristics of these outliers
+features.human_bots <- subset(features.train, bidder_id %in% humans_as_bots$bidder_id)
+
+### Create a corrected outcome to train on
+mod.train <- train
+library(plyr)
+mod2.train <- join(mod.train, humans_as_bots, by = "bidder_id")
+mod2.train$is_bot[is.na(mod2.train$is_bot)] <- 0
+
+# A bot is now the OR of either original outcome or via outlier detection
+mod2.train$outcome <- with(mod2.train, (outcome | is_bot)*1)
+mod2.train <- subset(mod2.train, select = c(bidder_id, outcome))
+
+names(mod2.train) <- c('bidder_id', 'mod_outcome')
+detach(package:plyr)
+
+
+
+
+```
+
+Notes: 
+- We see here that by looking at bid frequency, we have possibly found atleast 19 humans that should be classified as bots
+-05/21 update - DONT use this crude measure to identify anomalies. Using OneClassSVM in python to do that.
+
+## Feature Engineering - Part 9
+### Hypothesis 10 - Calculate per country features
+
+```{r}
+
+## Device stats per country by bidder_id
+f2 <- bids.raw %>%
+  group_by(bidder_id, country, device) %>%
+  summarize(nbids = n()) %>%  
+  arrange(bidder_id, country)
+
+f2a <- f2 %>%
+  group_by(bidder_id, country) %>%
+  summarize(num_devices = n()) %>%
+  arrange(bidder_id, country)
+
+f3 <- f2a %>%
+  group_by(bidder_id) %>%
+  summarize(avg_devp_con = mean(num_devices), max_devp_con = max(num_devices), sd_devp_con = sd(num_devices)) %>%
+  arrange(bidder_id)
+
+temp <- subset(f3, is.na(sd_devp_con))
+dim(temp)
+# Replace NaNs with 0 for now
+f3[is.na(f3)] <- 0
+
+f3.bots <- subset(f3, bidder_id %in% bots$bidder_id)
+f3.humans <- subset(f3, bidder_id %in% humans$bidder_id)
+
+# Finally split based on test and training set and merge into features
+f3.train <- subset(f3, bidder_id %in% train$bidder_id)
+f3.test <- subset(f3, bidder_id %in% test$bidder_id)
+
+features.train <- merge(features.train, f3.train, by = "bidder_id")
+head(features.train)
+features.test <- merge(features.test, f3.test, by = "bidder_id")
+head(features.test)
+
+
+
+## Ip stats per country by bidder_id
+f2 <- bids.raw %>%
+  group_by(bidder_id, country, ip) %>%
+  summarize(nbids = n()) %>%  
+  arrange(bidder_id, country)
+
+f2a <- f2 %>%
+  group_by(bidder_id, country) %>%
+  summarize(num_ips = n()) %>%
+  arrange(bidder_id, country)
+
+f3 <- f2a %>%
+  group_by(bidder_id) %>%
+  summarize(avg_ipp_con = mean(num_ips), max_ipp_con = max(num_ips), sd_ipp_con = sd(num_ips)) %>%
+  arrange(bidder_id)
+
+temp <- subset(f3, is.na(sd_ipp_con))
+dim(temp)
+# Replace NaNs with 0 for now
+f3[is.na(f3)] <- 0
+
+f3.bots <- subset(f3, bidder_id %in% bots$bidder_id)
+f3.humans <- subset(f3, bidder_id %in% humans$bidder_id)
+
+# Finally split based on test and training set and merge into features
+f3.train <- subset(f3, bidder_id %in% train$bidder_id)
+f3.test <- subset(f3, bidder_id %in% test$bidder_id)
+
+features.train <- merge(features.train, f3.train, by = "bidder_id")
+head(features.train)
+features.test <- merge(features.test, f3.test, by = "bidder_id")
+head(features.test)
+
+
+## URL stats per country by bidder_id
+f2 <- bids.raw %>%
+  group_by(bidder_id, country, url) %>%
+  summarize(nbids = n()) %>%  
+  arrange(bidder_id, country)
+
+f2a <- f2 %>%
+  group_by(bidder_id, country) %>%
+  summarize(num_urls = n()) %>%
+  arrange(bidder_id, country)
+
+f3 <- f2a %>%
+  group_by(bidder_id) %>%
+  summarize(avg_urlp_con = mean(num_urls), max_urlp_con = max(num_urls), sd_urlp_con = sd(num_urls)) %>%
+  arrange(bidder_id)
+
+temp <- subset(f3, is.na(sd_urlp_con))
+dim(temp)
+# Replace NaNs with 0 for now
+f3[is.na(f3)] <- 0
+
+f3.bots <- subset(f3, bidder_id %in% bots$bidder_id)
+f3.humans <- subset(f3, bidder_id %in% humans$bidder_id)
+
+# Finally split based on test and training set and merge into features
+f3.train <- subset(f3, bidder_id %in% train$bidder_id)
+f3.test <- subset(f3, bidder_id %in% test$bidder_id)
+
+features.train <- merge(features.train, f3.train, by = "bidder_id")
+head(features.train)
+features.test <- merge(features.test, f3.test, by = "bidder_id")
+head(features.test)
+
+
+## auction stats per country by bidder_id
+f2 <- bids.raw %>%
+  group_by(bidder_id, country, auction) %>%
+  summarize(nbids = n()) %>%  
+  arrange(bidder_id, country)
+
+f2a <- f2 %>%
+  group_by(bidder_id, country) %>%
+  summarize(num_aucs = n()) %>%
+  arrange(bidder_id, country)
+
+f3 <- f2a %>%
+  group_by(bidder_id) %>%
+  summarize(avg_aucp_con = mean(num_aucs), max_aucp_con = max(num_aucs), sd_aucp_con = sd(num_aucs)) %>%
+  arrange(bidder_id)
+
+temp <- subset(f3, is.na(sd_aucp_con))
+dim(temp)
+# Replace NaNs with 0 for now
+f3[is.na(f3)] <- 0
+
+f3.bots <- subset(f3, bidder_id %in% bots$bidder_id)
+f3.humans <- subset(f3, bidder_id %in% humans$bidder_id)
+
+# Finally split based on test and training set and merge into features
+f3.train <- subset(f3, bidder_id %in% train$bidder_id)
+f3.test <- subset(f3, bidder_id %in% test$bidder_id)
+
+features.train <- merge(features.train, f3.train, by = "bidder_id")
+head(features.train)
+features.test <- merge(features.test, f3.test, by = "bidder_id")
+head(features.test)
+
+
+```
+
+## Feature Engineering - Part 10
+### Hypothesis 11 - Calculate per auction features
+
+```{r}
+
+## Device stats per auction by bidder_id
+f2 <- bids.raw %>%
+  group_by(bidder_id, auction, device) %>%
+  summarize(nbids = n()) %>%  
+  arrange(bidder_id, auction)
+
+f2a <- f2 %>%
+  group_by(bidder_id, auction) %>%
+  summarize(num_devices = n()) %>%
+  arrange(bidder_id, auction)
+
+f3 <- f2a %>%
+  group_by(bidder_id) %>%
+  summarize(avg_devp_auc = mean(num_devices), max_devp_auc = max(num_devices), sd_devp_auc = sd(num_devices)) %>%
+  arrange(bidder_id)
+
+temp <- subset(f3, is.na(sd_devp_auc))
+dim(temp)
+# Replace NaNs with 0 for now
+f3[is.na(f3)] <- 0
+
+f3.bots <- subset(f3, bidder_id %in% bots$bidder_id)
+f3.humans <- subset(f3, bidder_id %in% humans$bidder_id)
+
+# Finally split based on test and training set and merge into features
+f3.train <- subset(f3, bidder_id %in% train$bidder_id)
+f3.test <- subset(f3, bidder_id %in% test$bidder_id)
+
+features.train <- merge(features.train, f3.train, by = "bidder_id")
+head(features.train)
+features.test <- merge(features.test, f3.test, by = "bidder_id")
+head(features.test)
+
+
+## IP stats per auction by bidder_id
+f2 <- bids.raw %>%
+  group_by(bidder_id, auction, ip) %>%
+  summarize(nbids = n()) %>%  
+  arrange(bidder_id, auction)
+
+f2a <- f2 %>%
+  group_by(bidder_id, auction) %>%
+  summarize(num_ips = n()) %>%
+  arrange(bidder_id, auction)
+
+f3 <- f2a %>%
+  group_by(bidder_id) %>%
+  summarize(avg_ipp_auc = mean(num_ips), max_ipp_auc = max(num_ips), sd_ipp_auc = sd(num_ips)) %>%
+  arrange(bidder_id)
+
+temp <- subset(f3, is.na(sd_ipp_auc))
+dim(temp)
+# Replace NaNs with 0 for now
+f3[is.na(f3)] <- 0
+
+f3.bots <- subset(f3, bidder_id %in% bots$bidder_id)
+f3.humans <- subset(f3, bidder_id %in% humans$bidder_id)
+
+# Finally split based on test and training set and merge into features
+f3.train <- subset(f3, bidder_id %in% train$bidder_id)
+f3.test <- subset(f3, bidder_id %in% test$bidder_id)
+
+features.train <- merge(features.train, f3.train, by = "bidder_id")
+head(features.train)
+features.test <- merge(features.test, f3.test, by = "bidder_id")
+head(features.test)
+
+
+## URL stats per auction by bidder_id
+f2 <- bids.raw %>%
+  group_by(bidder_id, auction, url) %>%
+  summarize(nbids = n()) %>%  
+  arrange(bidder_id, auction)
+
+f2a <- f2 %>%
+  group_by(bidder_id, auction) %>%
+  summarize(num_urls = n()) %>%
+  arrange(bidder_id, auction)
+
+f3 <- f2a %>%
+  group_by(bidder_id) %>%
+  summarize(avg_urlp_auc = mean(num_urls), max_urlp_auc = max(num_urls), sd_urlp_auc = sd(num_urls)) %>%
+  arrange(bidder_id)
+
+temp <- subset(f3, is.na(sd_ipp_auc))
+dim(temp)
+# Replace NaNs with 0 for now
+f3[is.na(f3)] <- 0
+
+f3.bots <- subset(f3, bidder_id %in% bots$bidder_id)
+f3.humans <- subset(f3, bidder_id %in% humans$bidder_id)
+
+# Finally split based on test and training set and merge into features
+f3.train <- subset(f3, bidder_id %in% train$bidder_id)
+f3.test <- subset(f3, bidder_id %in% test$bidder_id)
+
+features.train <- merge(features.train, f3.train, by = "bidder_id")
+head(features.train)
+features.test <- merge(features.test, f3.test, by = "bidder_id")
+head(features.test)
+
+
+```
+
+
+## Feature Engineering - Part 6
+### Hypothesis 7 - Engineer categories into features using long to wide form conversion
+
+Insight:
+- We know that bots never took part in 3 categories, use that fact as a possible feature to differentiate
+- 5/10/2015 - We know that merchandise flag had 0 predictive power
+- Converted merchandise from factor to long form and see if it has predictive power
+
+```{r}
+
+# *** Important function to convert factor to an integer
+as.numeric.factor <- function(x) {seq_along(levels(x))[x]}             # Unused
+
+# First, group by bidder id and sum up merchandise
+f2 <- bids.raw %>%
+  group_by(bidder_id, merchandise) %>%
+  summarize(nbids = n()) %>%  
+  arrange(bidder_id, merchandise)
+
+# Second, convert long to wide form using dcast from reshape
+f3 <- dcast(f2, bidder_id ~ merchandise, value.var = "nbids")
+# Convert all NAs to 0
+f3[is.na(f3)] <- 0
+head(f3)
+
+f3.bots <- subset(f3, bidder_id %in% bots$bidder_id)
+f3.humans <- subset(f3, bidder_id %in% humans$bidder_id)
+
+# Finally split based on test and training set and merge into features
+f3.train <- subset(f3, bidder_id %in% train$bidder_id)
+f3.test <- subset(f3, bidder_id %in% test$bidder_id)
+
+features.train <- merge(features.train, f3.train, by = "bidder_id")
+head(features.train)
+features.test <- merge(features.test, f3.test, by = "bidder_id")
+head(features.test)
+
+
+```
+Note:
+- Since almost all bidders only take part in one category, recording #bids per category is completely redundant with nbids
+- Hence, we do not build this feature
+
+
+
+### We have enough features for next submission
+Insight: Dump to csvs so that we can use sklearn in python to train models and see how well we do
+
+```{r}
+
+
+# ef stands for engineered features
+# We need the outcome for features train
+features.train <- merge(features.train, train, by = 'bidder_id')
+# Again, get rid of address and payment account
+features.train$address <- NULL
+features.train$payment_account <- NULL
+
+#obs.train <- subset(features.train, select = c(bidder_id, nbids, avg_bid_freq, num_auc, num_countries, num_devs, num_urls, num_ips, avg_bids_per_auc, avg_bids_per_con, avg_bids_per_dev, avg_bids_per_url, avg_bids_per_ip, sd_bids_per_auc, sd_bids_per_con, sd_bids_per_dev, sd_bids_per_url, sd_bids_per_ip, `books and music`, clothing, computers, furniture, `home goods`, jewelry, mobile, `office equipment`, `sporting goods`,  outcome))
+
+#obs.test <- subset(features.test, select = c(bidder_id, nbids, avg_bid_freq, num_auc, num_countries, num_devs, num_urls, num_ips, avg_bids_per_auc, avg_bids_per_con, avg_bids_per_dev, avg_bids_per_url, avg_bids_per_ip, sd_bids_per_auc, sd_bids_per_con, sd_bids_per_dev, sd_bids_per_url, sd_bids_per_ip, `books and music`, clothing, computers, furniture, `home goods`, jewelry, mobile, `office equipment`, `sporting goods`))
+
+obs.train <- features.train
+obs.test <- features.test
+
+obs.train$nlastbids <- NULL
+obs.test$nlastbids <- NULL
+
+obs.train$min_bp_auc <- NULL
+obs.train$min_bp_con <- NULL
+obs.train$min_bp_dev <- NULL
+obs.train$min_bp_ip <- NULL
+obs.train$min_bp_url <- NULL
+obs.test$min_bp_auc <- NULL
+obs.test$min_bp_con <- NULL
+obs.test$min_bp_dev <- NULL
+obs.test$min_bp_ip <- NULL
+obs.test$min_bp_url <- NULL
+
+## Feature importance for 59 feature RFC
+# From running feature importance on: clf = rfc(random_state = 30, max_depth = 6, n_estimators = 100, min_samples_leaf = 1, min_samples_split = 2, n_jobs = 4, criterion = 'entropy')
+# Feature_Importances:  [(0.073389469875494995, 'avg_bp_auc'), (0.071676151284974995, 'avg_bp_dev'), (0.053189636678637998, 'max_bp_dev'), (0.051159120706213, 'max_bp_con'), (0.046463087057129003, 'sd_bp_auc'), (0.044716622007327997, 'avg_bp_con'), (0.044453072607002, 'max_bp_auc'), (0.044249828967928999, 'nbids'), (0.029705579790654999, 'max_bp_url'), (0.024315668663179, 'med_bp_dev'), (0.022609017531779001, 'sd_bp_dev'), (0.022033833995454999, 'max_bp_ip'), (0.021324716893529001, 'sd_bp_ip'), (0.021156298155881999, 'med_bp_auc'), (0.021148059678339999, 'avg_bp_ip'), (0.018346787260404, 'avg_urlp_auc'), (0.016525963504594, 'avg_devp_con'), (0.01469387292802, 'avg_bp_url'), (0.014487524918652, 'sd_bp_con'), (0.01441859826515, 'max_devp_con'), (0.014294653914724001, 'num_urls'), (0.014248802493813001, 'med_bp_con'), (0.014135121200458, 'avg_ipp_auc'), (0.013888926362744001, 'sd_ipp_auc'), (0.013785683872195999, 'sd_devp_auc'), (0.013496936848376001, 'sd_devp_con'), (0.013381268233486, 'sd_bp_url'), (0.013073866330622, 'avg_devp_auc'), (0.013009136116164, 'max_ipp_auc'), (0.013000187526571, 'max_devp_auc'), (0.012911061184257, 'num_auc'), (0.012261850311395, 'num_devices'), (0.012150395462441999, 'max_aucp_con'), (0.01203156200906, 'max_ipp_con'), (0.011813989373657, 'sd_urlp_auc'), (0.011251394298645001, 'num_ips'), (0.011044965872990999, 'avg_aucp_con'), (0.010748874679180001, 'avg_ipp_con'), (0.01001402198696, 'max_urlp_auc'), (0.0098358499274239994, 'avg_urlp_con'), (0.0095542487911239992, 'sd_aucp_con'), (0.0094737610300409999, 'sd_urlp_con'), (0.0077473718595510001, 'avg_bid_freq'), (0.0075421463851770001, 'mobile'), (0.0074685106474469999, 'num_countries'), (0.0070636932275849997, 'sd_ipp_con'), (0.0061478223346140004, 'computers'), (0.0058699839195829996, 'max_urlp_con'), (0.004846284496014, 'med_bp_ip'), (0.0048358681118180003, 'med_bp_url'), (0.0031751711232009998, 'sporting goods'), (0.002956943594078, 'jewelry'), (0.0020111131153459998, 'home goods'), (0.00065900326032600003, 'office equipment'), (0.00020524446771299999, 'books and music'), (1.3748608700000001e-06, 'clothing'), (0.0, 'furniture'), (0.0, 'auto parts')]
+
+# Randomized Logistic Feature_Importances:  [(0.57499999999999996, 'sd_bp_ip'), (0.38, 'sd_bp_url'), (0.35249999999999998, 'avg_ipp_con'), (0.23749999999999999, 'avg_bp_url'), (0.23000000000000001, 'sd_bp_dev'), (0.16250000000000001, 'avg_aucp_con'), (0.16, 'computers'), (0.095000000000000001, 'sd_aucp_con'), (0.065000000000000002, 'avg_bp_dev'), (0.042500000000000003, 'num_countries'), (0.040000000000000001, 'med_bp_con'), (0.0275, 'med_bp_dev'), (0.025000000000000001, 'num_auc'), (0.02, 'avg_urlp_auc'), (0.02, 'avg_bp_con'), (0.0074999999999999997, 'max_aucp_con'), (0.0050000000000000001, 'sd_ipp_auc'), (0.0025000000000000001, 'sd_urlp_auc'), (0.0025000000000000001, 'sd_devp_auc'), (0.0025000000000000001, 'max_devp_con'), (0.0025000000000000001, 'avg_bp_auc'), (0.0, 'sporting goods'), (0.0, 'sd_urlp_con'), (0.0, 'sd_ipp_con'), (0.0, 'sd_devp_con'), (0.0, 'sd_bp_con'), (0.0, 'sd_bp_auc'), (0.0, 'office equipment'), (0.0, 'num_urls'), (0.0, 'num_ips'), (0.0, 'num_devices'), (0.0, 'nbids'), (0.0, 'mobile'), (0.0, 'med_bp_url'), (0.0, 'med_bp_ip'), (0.0, 'med_bp_auc'), (0.0, 'max_urlp_con'), (0.0, 'max_urlp_auc'), (0.0, 'max_ipp_con'), (0.0, 'max_ipp_auc'), (0.0, 'max_devp_auc'), (0.0, 'max_bp_url'), (0.0, 'max_bp_ip'), (0.0, 'max_bp_dev'), (0.0, 'max_bp_con'), (0.0, 'max_bp_auc'), (0.0, 'jewelry'), (0.0, 'home goods'), (0.0, 'furniture'), (0.0, 'clothing'), (0.0, 'books and music'), (0.0, 'avg_urlp_con'), (0.0, 'avg_ipp_auc'), (0.0, 'avg_devp_con'), (0.0, 'avg_devp_auc'), (0.0, 'avg_bp_ip'), (0.0, 'avg_bid_freq'), (0.0, 'auto parts')]
+
+# Pruned to top 40 features
+obs.train <- subset(features.train, select = c('bidder_id', 'sd_bp_ip', 'sd_bp_url', 'avg_ipp_con', 'avg_bp_url', 'sd_bp_dev', 'avg_aucp_con', 'computers', 'sd_aucp_con', 'avg_bp_dev', 'num_countries', 'med_bp_con', 'med_bp_dev', 'num_auc', 'avg_urlp_auc', 'avg_bp_con', 'max_aucp_con', 'sd_ipp_auc', 'sd_urlp_auc', 'sd_devp_auc', 'max_devp_con', 'avg_bp_auc', 'outcome'))
+obs.test <- subset(features.test, select =  c('bidder_id', 'sd_bp_ip', 'sd_bp_url', 'avg_ipp_con', 'avg_bp_url', 'sd_bp_dev', 'avg_aucp_con', 'computers', 'sd_aucp_con', 'avg_bp_dev', 'num_countries', 'med_bp_con', 'med_bp_dev', 'num_auc', 'avg_urlp_auc', 'avg_bp_con', 'max_aucp_con', 'sd_ipp_auc', 'sd_urlp_auc', 'sd_devp_auc', 'max_devp_con', 'avg_bp_auc'))
+
+
+### Output humans to another CSV to experiment with outlier detection algorithms
+obs.train.humans <- subset(obs.train, outcome == 0)
+obs.train.bots <- subset(obs.train, outcome == 1)
+dim(obs.train.humans)
+write.csv(obs.train.humans, "D:/Kaggle/HumanVRobot/train_humans_ef_38f.csv", row.names = F, sep = ",", col.names = T)
+
+head(obs.train)
+dim(obs.train)
+
+head(obs.test)
+dim(obs.test)
+
+write.csv(obs.train, "D:/Kaggle/HumanVRobot/train_ef_21f_selrlr.csv", row.names = F, sep = ",", col.names = T)
+write.csv(obs.test, "D:/Kaggle/HumanVRobot/test_ef_21f_selrlr.csv", row.names = F, sep = ",", col.names = T)
+
+# Dump test bidders who don't have a single bid - Dealt with this directly in Python
+
+
+```
