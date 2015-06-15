@@ -1,0 +1,132 @@
+---
+title: "xgboost classifier for HumanVRobot FB problem"
+author: "Vijay Sathish"
+date: "Wednesday, May 27, 2015"
+output: html_document
+---
+
+```{r loading}
+require(xgboost)
+require(methods)
+require(data.table)
+require(magrittr)
+```
+
+
+### Load in training and test sets and pre-process
+```{r}
+
+train.xg <- read.csv("D:/Kaggle/HumanVRobot/train_ef_59f.csv", header = T)
+test.xg <- read.csv("D:/Kaggle/HumanVRobot/test_ef_59f.csv", header = T)
+
+# train.xg <- read.csv("D:/Kaggle/HumanVRobot/train_ef_38f.csv", header = T)
+# test.xg <- read.csv("D:/Kaggle/HumanVRobot/test_ef_38f.csv", header = T)
+```
+
+
+### Pre-processing 
+- Collect test bidder_ids into a different data frame
+- Collect labels into separate dataframe for test set
+- Delete bidder_id in both datasets
+```{r}
+test.xg.bidder_id <- data.frame(test.xg$bidder_id) 
+names(test.xg.bidder_id) <- c("bidder_id")
+
+labels <- data.frame(train.xg$outcome)
+names(labels) <- c("outcome")
+labels <- as.matrix(labels)
+
+train.xg$bidder_id <- NULL
+train.xg$outcome <- NULL
+
+test.xg$bidder_id <- NULL
+
+dim(train.xg)
+dim(test.xg)
+
+```
+
+
+### Load in the test bidder ids from original dataset since some bidder_ids had no bids
+```{r}
+
+test <- read.csv("D:/Kaggle/HumanVRobot/test.csv", header = T)
+test.bidder_id <- data.frame(test$bidder_id) 
+names(test.bidder_id) <- c("bidder_id")
+
+```
+
+
+### xgboost does not work with data frames yet
+```{r convertToNumericMatrix}
+features.xg.train <- train.xg %>% as.matrix
+features.xg.test <- as.matrix(test.xg) 
+
+```
+
+
+### xgboost Cross-Validation
+```{r}
+
+# There seems to be a ton of objectives, check which ones are applicable for me
+# booster can be gbtree or gblinear
+# Might need to try different values for scale_pos_weight to see if we can improve auc
+param_list <- list("booster" = "gbtree",
+        "objective" = "binary:logistic",       # Try binary:logistic if this one doesn't work
+        "eval_metric" = "auc",
+        "max_depth" = 3,
+        # "gamma" = 1
+        "eta" = 0.02,               # Equivalent to learning_rate    
+        "nthread" = 1,  
+        "subsample" = 0.8,
+        "column_subsample" = 0.8,
+        # "scale_pos_weight" = 0.5 * 1910/103,     # First, try without this if model complains, but useful for skewed classes like FB dataset
+        # "silent" = 1,             # if we don't want output for each iteration
+        "Seed" = 30)
+
+cv.nround <- 500      # This is number of trees to build
+cv.nfold <- 8        # Figure out if we can do stratified n-fold with some extra option
+
+bst.cv <- xgb.cv(param = param_list, data = features.xg.train, label = labels, 
+                nfold = cv.nfold, nrounds = cv.nround, set.seed(30))
+
+
+```
+
+
+### xgboost Training
+```{r}
+nround <- 96
+bst <- xgboost (param = param_list, data = features.xg.train, label = labels, nrounds = nround, set.seed(30))
+
+```
+
+
+### xgboost Prediction on test set
+Create output file for submission
+```{r}
+pred_prob <- predict(bst, features.xg.test)
+
+output <- data.frame(pred_prob)
+output$bidder_id <- xg.bidder_id$bidder_id
+names(output) <- c("prediction", "bidder_id")
+
+# Extract vestigial bidder_ids and merge with output dataframe
+xg.test.vest <- subset(test.bidder_id, !(bidder_id %in% xg.bidder_id$bidder_id))
+xg.test.vest$prediction <- 0.0
+dim(xg.test.vest)
+
+# Merge the two together
+submission <- rbind(xg.test.vest, output)
+dim(submission)
+
+```
+
+
+### Write output to submission file
+```{r}
+write.csv(submission, "D:/Kaggle/HumanVRobot/results/xgb_tune_38feat_v1.csv", row.names = F, sep = ",", col.names = T)
+
+```
+
+
