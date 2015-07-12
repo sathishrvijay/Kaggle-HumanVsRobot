@@ -1,5 +1,8 @@
 # Kaggle-HumanVRobot
 
+### Final Standing
+- Finished 314/985 (top third) in private leaderboard 
+
 ### Files
 - eda2.Rmd 
 Load in original dataset for competition, exploratory data analysis and feature engineering
