@@ -3,14 +3,18 @@
 ### Final Standing
 - Finished 314/985 (top third) in private leaderboard 
 
+### Problem Statement
+- The problem was to look at the bidding behavior of a user in online auctions and classify the user as a genuine user or bidding bot. The problem is important because the ability to isolate and suspend bot accounts accurately improves the user experience and may help improve human bidders enrollment and engagement. 
+- The problem boils down to a binary classification problem with skewed classes (way more humans than bots) and significant feature engineering prior to model training and prediction
+
 ### Files
 - eda2.Rmd 
 Load in original dataset for competition, exploratory data analysis and feature engineering
-- classifier_exp.py
+- classifier_exp.py -
 Load in engineered features dataframe for training and test sets, model training, tuning and prediction and create submission files
-- xgboost_clf.Rmd
+- xgboost_clf.Rmd -
 XGBoost model for training and prediction in R. Didn't do as well as expected although it was blazing fast.
-- ensemble_blending.py
+- ensemble_blending.py -
 Create a blended ensemble of best tuned models to improve robustness of final submission and reduce overfitting to training set
 
 ### Models & Tuning
