@@ -1,4 +1,4 @@
-# Kaggle-HumanVRobot
+# Kaggle - Facebook Human vs. Robot
 
 ### Final Standing
 - Finished 314/985 (top third) in private leaderboard 
